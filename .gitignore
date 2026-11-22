@@ -1,0 +1,14 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+coverage.out
+
+# Local settings
+.env
+
+# IDEs
+.idea/
+.vscode/
+/data/

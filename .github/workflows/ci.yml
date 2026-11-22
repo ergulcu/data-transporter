@@ -1,0 +1,96 @@
+# Copyright 2025 Mehmet ERGULCU
+# SPDX-License-Identifier: Apache-2.0
+
+# Unit tests on every push and pull request, the integration tests against real databases, and the image.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: gofmt, vet, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "Run gofmt -w on:"; echo "$unformatted"; exit 1; fi
+      - run: go vet ./... && go vet -tags integration ./...
+      - name: Test (on SQLite)
+        run: go test -race ./...
+      - name: Build for Linux, Windows and macOS
+        run: |
+          for target in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/...
+          done
+      - name: License headers
+        run: |
+          missing=$(git ls-files '*.go' '*.yml' '*.yaml' '*.sql' 'Dockerfile' | xargs -r grep -L 'SPDX-License-Identifier' || true)
+          if [ -n "$missing" ]; then
+            echo "These files have no license header:"
+            echo "$missing"
+            exit 1
+          fi
+
+  integration:
+    name: PostgreSQL, MySQL, SQL Server and Oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      # The four database images and their data files do not fit on the runner's free disk otherwise
+      # (Oracle stopped with "No space left on device").
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Integration tests against real databases (Testcontainers)
+        run: go test -tags integration -timeout 30m ./...
+
+  image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Random API password for this run
+        run: echo "DATATRANSPORTER_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+      - run: docker compose up -d --build --wait
+      - name: Copy a table from PostgreSQL to MySQL through the API
+        run: |
+          for i in $(seq 1 30); do curl -sf localhost:8888/healthz && break; sleep 1; done
+          docker compose exec -T postgres psql -U shop -d shop -c \
+            "CREATE TABLE person (id int, full_name text); INSERT INTO person SELECT n, 'Kişi ' || n FROM generate_series(1, 2500) n"
+          docker compose exec -T mysql mysql -ushop -pshop shop -e \
+            "CREATE TABLE people (person_id INT PRIMARY KEY, name VARCHAR(100))"
+          api() { curl -sf -u "admin:$DATATRANSPORTER_PASSWORD" -H 'Content-Type: application/json' "$@"; }
+          api localhost:8888/db/config -d '{"code": "source", "driver": "postgres", "url": "postgres://postgres:5432/shop?sslmode=disable", "username": "shop", "password": "shop"}'
+          api localhost:8888/db/config -d '{"code": "target", "driver": "mysql", "url": "mysql://mysql:3306/shop", "username": "shop", "password": "shop"}'
+          api -X POST localhost:8888/db/config/target/test | grep -q '"success":true'
+          api localhost:8888/db/migrate -d '{"sourceCode": "source", "targetCode": "target",
+            "sourceQuery": "SELECT id, full_name FROM person",
+            "targetQuery": "INSERT INTO people (person_id, name) VALUES (:id, :full_name)"}' | tee result.json
+          grep -q '"transferredRows":2500' result.json
+          docker compose exec -T mysql mysql -ushop -pshop shop --default-character-set=utf8mb4 -N -e "SELECT name FROM people WHERE person_id = 7" | grep -q 'Kişi 7'
+      - if: failure()
+        run: docker compose logs datatransporter
+      - if: always()
+        run: docker compose down -v

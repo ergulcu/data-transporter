@@ -1,0 +1,46 @@
+# Copyright 2025 Mehmet ERGULCU
+# SPDX-License-Identifier: Apache-2.0
+
+# The service with a PostgreSQL and a MySQL database to try it on:
+#   docker compose up --build       http://localhost:8888 (user admin, password from DATATRANSPORTER_PASSWORD
+#                                   or, when not set, the random one in the log)
+# Inside this network the databases are postgres://postgres:5432/shop and mysql://mysql:3306/shop.
+services:
+  datatransporter:
+    build: .
+    ports:
+      - "8888:8888"
+    environment:
+      # Empty: a random password is generated and printed in the log (docker compose logs datatransporter).
+      # The key for the saved passwords is generated on the first start and kept in the data volume.
+      DATATRANSPORTER_PASSWORD: ${DATATRANSPORTER_PASSWORD:-}
+    volumes:
+      - datatransporter-data:/data
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: shop
+      MYSQL_USER: shop
+      MYSQL_PASSWORD: shop
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ushop", "-pshop"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+volumes:
+  datatransporter-data:
